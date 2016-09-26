@@ -535,7 +535,10 @@ ngFileUpload.service('Upload', ['$parse', '$timeout', '$compile', '$q', 'UploadE
 
       if (ngModel) {
         upload.applyModelValidation(ngModel, files);
-        ngModel.$setViewValue(isSingleModel ? file : files);
+
+        if (files.length) {
+          ngModel.$setViewValue(isSingleModel ? file : files);
+        }
       }
 
       if (fileChange) {
