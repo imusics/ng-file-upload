@@ -3,7 +3,7 @@
  * progress, resize, thumbnail, preview, validation and CORS
  * FileAPI Flash shim for old browsers not supporting FormData
  * @author  Danial  <danial.farid@gmail.com>
- * @version 12.2.11
+ * @version 12.2.13
  */
 
 (function () {
@@ -424,7 +424,7 @@ if (!window.FileReader) {
  * AngularJS file upload directives and services. Supoorts: file upload/drop/paste, resume, cancel/abort,
  * progress, resize, thumbnail, preview, validation and CORS
  * @author  Danial  <danial.farid@gmail.com>
- * @version 12.2.11
+ * @version 12.2.13
  */
 
 if (window.XMLHttpRequest && !(window.FileAPI && FileAPI.shouldLoad)) {
@@ -445,7 +445,7 @@ if (window.XMLHttpRequest && !(window.FileAPI && FileAPI.shouldLoad)) {
 
 var ngFileUpload = angular.module('ngFileUpload', []);
 
-ngFileUpload.version = '12.2.11';
+ngFileUpload.version = '12.2.13';
 
 ngFileUpload.service('UploadBase', ['$http', '$q', '$timeout', function ($http, $q, $timeout) {
   var upload = this;
@@ -902,13 +902,13 @@ ngFileUpload.service('Upload', ['$parse', '$timeout', '$compile', '$q', 'UploadE
     return $q.all(promises);
   }
 
-  function resize(files, attr, scope) {
+  function resizeFile(files, attr, scope, ngModel) {
     var resizeVal = upload.attrGetter('ngfResize', attr, scope);
     if (!resizeVal || !upload.isResizeSupported() || !files.length) return upload.emptyPromise();
     if (resizeVal instanceof Function) {
       var defer = $q.defer();
       return resizeVal(files).then(function (p) {
-        resizeWithParams(p, files, attr, scope).then(function (r) {
+        resizeWithParams(p, files, attr, scope, ngModel).then(function (r) {
           defer.resolve(r);
         }, function (e) {
           defer.reject(e);
@@ -917,11 +917,11 @@ ngFileUpload.service('Upload', ['$parse', '$timeout', '$compile', '$q', 'UploadE
         defer.reject(e);
       });
     } else {
-      return resizeWithParams(resizeVal, files, attr, scope);
+      return resizeWithParams(resizeVal, files, attr, scope, ngModel);
     }
   }
 
-  function resizeWithParams(params, files, attr, scope) {
+  function resizeWithParams(params, files, attr, scope, ngModel) {
     var promises = [upload.emptyPromise()];
 
     function handleFile(f, i) {
@@ -937,7 +937,10 @@ ngFileUpload.service('Upload', ['$parse', '$timeout', '$compile', '$q', 'UploadE
           files.splice(i, 1, resizedFile);
         }, function (e) {
           f.$error = 'resize';
+          (f.$errorMessages = (f.$errorMessages || {})).resize = true;
           f.$errorParam = (e ? (e.message ? e.message : e) + ': ' : '') + (f && f.name);
+          ngModel.$ngfValidations.push({name: 'resize', valid: false});
+          upload.applyModelValidation(ngModel, files);
         });
       }
     }
@@ -1036,19 +1039,30 @@ ngFileUpload.service('Upload', ['$parse', '$timeout', '$compile', '$q', 'UploadE
         }, options && options.debounce ? options.debounce.change || options.debounce : 0);
       }
 
-      resize(validateAfterResize ? allNewFiles : valids, attr, scope).then(function () {
+      var resizingFiles = validateAfterResize ? allNewFiles : valids;
+      resizeFile(resizingFiles, attr, scope, ngModel).then(function () {
         if (validateAfterResize) {
           upload.validate(allNewFiles, keep ? prevValidFiles.length : 0, ngModel, attr, scope)
             .then(function (validationResult) {
-              valids = validationResult.validsFiles;
-              invalids = validationResult.invalidsFiles;
+              valids = validationResult.validFiles;
+              invalids = validationResult.invalidFiles;
               updateModel();
             });
         } else {
           updateModel();
         }
-      }, function (e) {
-        throw 'Could not resize files ' + e;
+      }, function () {
+        for (var i = 0; i < resizingFiles.length; i++) {
+          var f = resizingFiles[i];
+          if (f.$error === 'resize') {
+            var index = valids.indexOf(f);
+            if (index > -1) {
+              valids.splice(index, 1);
+              invalids.push(f);
+            }
+            updateModel();
+          }
+        }
       });
     }
 
@@ -1171,21 +1185,25 @@ ngFileUpload.directive('ngfSelect', ['$parse', '$timeout', '$compile', 'Upload',
         fileElem.attr('accept', attrGetter('ngfAccept', scope));
       }));
     }
-    attr.$observe('accept', function () {
+    unwatches.push(attr.$observe('accept', function () {
       fileElem.attr('accept', attrGetter('accept'));
-    });
-    unwatches.push(function () {
-      if (attr.$$observers) delete attr.$$observers.accept;
-    });
-    function bindAttrToFileInput(fileElem) {
+    }));
+    function bindAttrToFileInput(fileElem, label) {
+      function updateId(val) {
+        fileElem.attr('id', 'ngf-' + val);
+        label.attr('id', 'ngf-label-' + val);
+      }
+
       for (var i = 0; i < elem[0].attributes.length; i++) {
         var attribute = elem[0].attributes[i];
         if (attribute.name !== 'type' && attribute.name !== 'class' && attribute.name !== 'style') {
-          if (attribute.value == null || attribute.value === '') {
-            if (attribute.name === 'required') attribute.value = 'required';
-            if (attribute.name === 'multiple') attribute.value = 'multiple';
+          if (attribute.name === 'id') {
+            updateId(attribute.value);
+            unwatches.push(attr.$observe('id', updateId));
+          } else {
+            fileElem.attr(attribute.name, (!attribute.value && (attribute.name === 'required' ||
+            attribute.name === 'multiple')) ? attribute.name : attribute.value);
           }
-          fileElem.attr(attribute.name, attribute.name === 'id' ? 'ngf-' + attribute.value : attribute.value);
         }
       }
     }
@@ -1197,15 +1215,12 @@ ngFileUpload.directive('ngfSelect', ['$parse', '$timeout', '$compile', 'Upload',
 
       var fileElem = angular.element('<input type="file">');
 
-      bindAttrToFileInput(fileElem);
-
       var label = angular.element('<label>upload</label>');
       label.css('visibility', 'hidden').css('position', 'absolute').css('overflow', 'hidden')
         .css('width', '0px').css('height', '0px').css('border', 'none')
         .css('margin', '0px').css('padding', '0px').attr('tabindex', '-1');
-      if (elem.attr('id')) {
-        label.attr('id', 'ngf-label-' + elem.attr('id'));
-      }
+      bindAttrToFileInput(fileElem, label);
+
       generatedElems.push({el: elem, ref: label});
 
       document.body.appendChild(label.append(fileElem)[0]);
@@ -1230,7 +1245,8 @@ ngFileUpload.directive('ngfSelect', ['$parse', '$timeout', '$compile', 'Upload',
           document.body.appendChild(fileElem.parent()[0]);
           fileElem.bind('change', changeFn);
         }
-      } catch(e){/*ignore*/}
+      } catch (e) {/*ignore*/
+      }
 
       if (isDelayedClickSupported(navigator.userAgent)) {
         setTimeout(function () {
@@ -1260,7 +1276,7 @@ ngFileUpload.directive('ngfSelect', ['$parse', '$timeout', '$compile', 'Upload',
             var currentX = touches[0].clientX;
             var currentY = touches[0].clientY;
             if ((Math.abs(currentX - initialTouchStartX) > 20) ||
-            (Math.abs(currentY - initialTouchStartY) > 20)) {
+              (Math.abs(currentY - initialTouchStartY) > 20)) {
               evt.stopPropagation();
               evt.preventDefault();
               return false;
@@ -1497,15 +1513,19 @@ ngFileUpload.directive('ngfSelect', ['$parse', '$timeout', '$compile', 'Upload',
         var size = resizeParams;
         if (directiveName === 'ngfThumbnail') {
           if (!size) {
-            size = {width: elem[0].naturalWidth || elem[0].clientWidth,
-              height: elem[0].naturalHeight || elem[0].clientHeight};
+            size = {
+              width: elem[0].naturalWidth || elem[0].clientWidth,
+              height: elem[0].naturalHeight || elem[0].clientHeight
+            };
           }
           if (size.width === 0 && window.getComputedStyle) {
             var style = getComputedStyle(elem[0]);
-            size = {
-              width: parseInt(style.width.slice(0, -2)),
-              height: parseInt(style.height.slice(0, -2))
-            };
+            if (style.width && style.width.indexOf('px') > -1 && style.height && style.height.indexOf('px') > -1) {
+              size = {
+                width: parseInt(style.width.slice(0, -2)),
+                height: parseInt(style.height.slice(0, -2))
+              };
+            }
           }
         }
 
@@ -2079,14 +2099,15 @@ ngFileUpload.service('UploadValidate', ['UploadDataUrl', '$q', '$timeout', funct
 
         el.on('loadedmetadata', success);
         el.on('error', error);
+        
         var count = 0;
-
         function checkLoadError() {
+          count++;
           $timeout(function () {
             if (el[0].parentNode) {
               if (el[0].duration) {
                 success();
-              } else if (count > 10) {
+              } else if (count++ > 10) {
                 error();
               } else {
                 checkLoadError();
@@ -2363,23 +2384,7 @@ ngFileUpload.service('UploadResize', ['UploadValidate', '$q', function (UploadVa
       if (stopPropagation(scope)) evt.stopPropagation();
       if (actualDragOverClass) elem.removeClass(actualDragOverClass);
       actualDragOverClass = null;
-      var items = evt.dataTransfer.items;
-      var html;
-      try {
-        html = evt.dataTransfer && evt.dataTransfer.getData && evt.dataTransfer.getData('text/html');
-      } catch (e) {/* Fix IE11 that throw error calling getData */
-      }
-
-      extractFiles(items, evt.dataTransfer.files, attrGetter('ngfAllowDir', scope) !== false,
-        attrGetter('multiple') || attrGetter('ngfMultiple', scope)).then(function (files) {
-        if (files.length) {
-          updateModel(files, evt);
-        } else {
-          extractFilesFromHtml('dropUrl', html).then(function (files) {
-            updateModel(files, evt);
-          });
-        }
-      });
+      extractFilesAndUpdateModel(evt.dataTransfer, evt, 'dropUrl');
     }, false);
     elem[0].addEventListener('paste', function (evt) {
       if (navigator.userAgent.toLowerCase().indexOf('firefox') > -1 &&
@@ -2387,22 +2392,7 @@ ngFileUpload.service('UploadResize', ['UploadValidate', '$q', function (UploadVa
         evt.preventDefault();
       }
       if (isDisabled() || !upload.shouldUpdateOn('paste', attr, scope)) return;
-      var files = [];
-      var clipboard = evt.clipboardData || evt.originalEvent.clipboardData;
-      if (clipboard && clipboard.items) {
-        for (var k = 0; k < clipboard.items.length; k++) {
-          if (clipboard.items[k].type.indexOf('image') !== -1) {
-            files.push(clipboard.items[k].getAsFile());
-          }
-        }
-      }
-      if (files.length) {
-        updateModel(files, evt);
-      } else {
-        extractFilesFromHtml('pasteUrl', clipboard).then(function (files) {
-          updateModel(files, evt);
-        });
-      }
+      extractFilesAndUpdateModel(evt.clipboardData || evt.originalEvent.clipboardData, evt, 'pasteUrl');
     }, false);
 
     if (navigator.userAgent.toLowerCase().indexOf('firefox') > -1 &&
@@ -2411,6 +2401,27 @@ ngFileUpload.service('UploadResize', ['UploadValidate', '$q', function (UploadVa
       elem.on('keypress', function (e) {
         if (!e.metaKey && !e.ctrlKey) {
           e.preventDefault();
+        }
+      });
+    }
+
+    function extractFilesAndUpdateModel(source, evt, updateOnType) {
+      if (!source) return;
+      // html needs to be calculated on the same process otherwise the data will be wiped
+      // after promise resolve or setTimeout.
+      var html;
+      try {
+        html = source && source.getData && source.getData('text/html');
+      } catch (e) {/* Fix IE11 that throw error calling getData */
+      }
+      extractFiles(source.items, source.files, attrGetter('ngfAllowDir', scope) !== false,
+        attrGetter('multiple') || attrGetter('ngfMultiple', scope)).then(function (files) {
+        if (files.length) {
+          updateModel(files, evt);
+        } else {
+          extractFilesFromHtml(updateOnType, html).then(function (files) {
+            updateModel(files, evt);
+          });
         }
       });
     }
